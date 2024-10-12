@@ -2,6 +2,8 @@ local M = {}
 
 local options = {
 	overwrite_q_command = true,
+	remap_ZZ_key = false,
+	warn_on_open_buffers_only = false,
  	quit_message = "Do you want to quit?",
 }
 
@@ -35,8 +37,21 @@ local function is_last_window()
 	return count == 1
 end
 
-local function prompt_user_to_quit()
-	return vim.fn.confirm(options.quit_message, "&Yes\n&No", 2, "Question") == 1
+local function is_last_buffer()
+	local buffers = vim.api.nvim_list_bufs()
+	local count = 0
+
+	for _, buf in ipairs(buffers) do
+		if vim.api.nvim_get_option_value('buflisted', { buf = buf }) then
+			count = count + 1
+		end
+	end
+	return count <= 1
+end
+
+local function prompt_user_to_quit(reason)
+	reason = reason or ""
+	return vim.fn.confirm(reason .. options.quit_message, "&Yes\n&No", 2, "Question") == 1
 end
 
 --- A wrapper for pcall that just prints an error in case of failure
@@ -55,17 +70,41 @@ local function quitall(opts)
 	pcall_panic(vim.cmd.quitall, { bang = opts.bang, mods = { silent = true } })
 end
 
-local confirm_quit_default_opts = { bang = false }
+local function save(opts)
+	pcall_panic(vim.cmd.write, { bang = opts.bang, mods = { silent = true } })
+end
+
+local confirm_quit_default_opts = { bang = false, save = false }
+
+function M.confirm_quit_save(opts)
+	opts = opts or confirm_quit_default_opts
+
+	if vim.bo.modified then
+		opts.save = true
+	end
+
+	M.confirm_quit(opts)
+end
 
 function M.confirm_quit(opts)
 	opts = opts or confirm_quit_default_opts
 
 	local is_last_tab_page = vim.fn.tabpagenr("$") == 1
 	local is_last_viewable = is_last_window() and is_last_tab_page
+	local is_last_open_buffer = (options.warn_on_open_buffers_only and is_last_buffer())
+	local reason = ""
+	if options.warn_on_open_buffers_only and not is_last_open_buffer then
+		reason = "Multiple open buffers. "
+	end
 	local should_quit = opts.bang                                  -- Force-quit without prompting
-	                    or (vim.bo.modified and not vim.o.confirm) -- or: Unsaved changes. Try quit to print error
+	                    or (vim.bo.modified and not vim.o.confirm and not opts.save) -- or: Unsaved changes. Try quit to print error
+	                    or is_last_open_buffer                     -- Last buffer. Simply quit if option set
 	                    or not is_last_viewable                    -- or: Isn't last viewable. Simply quit
-	                    or prompt_user_to_quit()                   -- or: Last viewable. Prompt to quit
+	                    or prompt_user_to_quit(reason)             -- or: Last viewable. Prompt to quit
+
+	if opts.save then
+		save(opts)
+	end
 
 	if should_quit then
 		quit(opts)
@@ -93,6 +132,9 @@ local function setup_autocmds()
 	vim.api.nvim_create_user_command("ConfirmQuitAll", function(opts)
 		M.confirm_quit_all { bang = opts.bang }
 	end, command_opts)
+	vim.api.nvim_create_user_command("ConfirmQuitAndSave", function(opts)
+		M.confirm_quit_save { bang = opts.bang }
+	end, command_opts)
 end
 
 local function setup_abbreviations()
@@ -118,6 +160,10 @@ function M.setup(config)
 
 	if options.overwrite_q_command then
 		setup_abbreviations()
+	end
+
+	if options.remap_ZZ_key then
+		vim.keymap.set('n', 'ZZ', '<cmd>ConfirmQuitAndSave<CR>')
 	end
 
 	setup_autocmds()
